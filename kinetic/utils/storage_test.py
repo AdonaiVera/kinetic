@@ -11,7 +11,9 @@ from absl.testing import absltest, parameterized
 
 from kinetic.constants import get_default_project
 from kinetic.data import Data
+from kinetic.utils import storage as storage_module
 from kinetic.utils.storage import (
+  DEFAULT_RETRY,
   _compute_total_size,
   _upload_directory,
   cleanup_artifacts,
@@ -35,6 +37,7 @@ class _GcsTestBase(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
+    storage_module._cached_clients.clear()
     self.mock_gcs = self.enterContext(
       mock.patch(
         "kinetic.utils.storage.storage.Client",
@@ -126,9 +129,9 @@ class TestCleanupArtifacts(_GcsTestBase):
     cleanup_artifacts("my-bucket", "job-abc", project="proj")
 
     mock_bucket.list_blobs.assert_called_once_with(prefix="job-abc/")
-    blob1.delete.assert_called_once()
-    blob2.delete.assert_called_once()
-    blob3.delete.assert_called_once()
+    mock_bucket.delete_blobs.assert_called_once_with(
+      [blob1, blob2, blob3], retry=DEFAULT_RETRY
+    )
 
   def test_no_blobs_no_error(self):
     mock_bucket = self.mock_gcs.bucket.return_value
@@ -233,7 +236,9 @@ class TestUploadData(_GcsTestBase):
     # Marker written last
     marker_name = f"{expected_prefix}/.cache_marker"
     self.assertIn(marker_name, blobs)
-    blobs[marker_name].upload_from_string.assert_called_once_with("")
+    blobs[marker_name].upload_from_string.assert_called_once_with(
+      "", retry=mock.ANY
+    )
 
   @mock.patch(
     "kinetic.utils.storage.transfer_manager.upload_many_from_filenames",
@@ -261,7 +266,7 @@ class TestUploadData(_GcsTestBase):
     filenames = sorted(mock_upload.call_args[0][1])
     self.assertEqual(filenames, ["train.csv", "val.csv"])
     # Marker written after upload
-    marker_blob.upload_from_string.assert_called_once_with("")
+    marker_blob.upload_from_string.assert_called_once_with("", retry=mock.ANY)
 
   def test_custom_namespace(self):
     tmp = _make_temp_path(self)
