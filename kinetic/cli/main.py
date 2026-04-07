@@ -2,6 +2,7 @@
 
 import click
 
+from kinetic.cli.commands.accelerators import accelerators
 from kinetic.cli.commands.build_base import build_base
 from kinetic.cli.commands.config import config
 from kinetic.cli.commands.doctor import doctor
@@ -19,6 +20,7 @@ def cli():
   execution."""
 
 
+cli.add_command(accelerators)
 cli.add_command(up)
 cli.add_command(down)
 cli.add_command(status)
