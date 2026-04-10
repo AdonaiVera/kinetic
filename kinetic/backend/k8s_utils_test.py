@@ -6,15 +6,18 @@ from unittest.mock import MagicMock
 from absl.testing import absltest, parameterized
 from google.cloud import container_v1
 from kubernetes import client as k8s_client
+from kubernetes.client.rest import ApiException
 from kubernetes.config import ConfigException
 
 from kinetic.backend.k8s_utils import (
   GCSFUSE_CSI_DRIVER,
   _check_image_pull_errors,
   _check_node_pool_exists_cached,
+  _pod_exit_summary,
   build_gcs_fuse_v1_volumes,
   build_gcs_fuse_volumes,
   check_pod_scheduling,
+  collect_pod_failure_details,
   load_kube_config,
   parse_accelerator,
 )
@@ -279,6 +282,202 @@ class TestCheckNodePoolExistsCached(absltest.TestCase):
     self.mock_gke_client.list_node_pools.assert_called_once_with(
       parent="projects/test-project/locations/us-central1-c/clusters/test-cluster"
     )
+
+
+class TestPodExitSummary(absltest.TestCase):
+  def _make_pod(self, exit_code=None, reason=None, message=None):
+    pod = MagicMock()
+    cs = MagicMock()
+    cs.name = "kinetic-worker"
+    terminated = MagicMock()
+    terminated.exit_code = exit_code
+    terminated.reason = reason
+    terminated.message = message
+    cs.state.terminated = terminated
+    cs.last_state.terminated = None
+    pod.status.container_statuses = [cs]
+    pod.status.init_container_statuses = None
+    return pod
+
+  def test_exit_code_and_reason(self):
+    pod = self._make_pod(exit_code=137, reason="OOMKilled")
+    result = _pod_exit_summary(pod)
+    self.assertIn("137", result)
+    self.assertIn("OOMKilled", result)
+
+  def test_exit_code_only(self):
+    pod = self._make_pod(exit_code=1, reason=None)
+    result = _pod_exit_summary(pod)
+    self.assertEqual(result, "exit code 1")
+
+  def test_no_container_statuses(self):
+    pod = MagicMock()
+    pod.status.container_statuses = None
+    pod.status.init_container_statuses = None
+    self.assertIsNone(_pod_exit_summary(pod))
+
+  def test_no_terminated_state(self):
+    pod = MagicMock()
+    cs = MagicMock()
+    cs.name = "kinetic-worker"
+    cs.state.terminated = None
+    cs.last_state.terminated = None
+    pod.status.container_statuses = [cs]
+    pod.status.init_container_statuses = None
+    self.assertIsNone(_pod_exit_summary(pod))
+
+  def test_falls_back_to_last_state(self):
+    pod = MagicMock()
+    cs = MagicMock()
+    cs.name = "kinetic-worker"
+    cs.state.terminated = None
+    terminated = MagicMock()
+    terminated.exit_code = 2
+    terminated.reason = "Error"
+    terminated.message = None
+    cs.last_state.terminated = terminated
+    pod.status.container_statuses = [cs]
+    pod.status.init_container_statuses = None
+    result = _pod_exit_summary(pod)
+    self.assertIn("exit code 2", result)
+    self.assertIn("Error", result)
+
+  def test_prioritizes_kinetic_worker(self):
+    pod = MagicMock()
+    sidecar = MagicMock()
+    sidecar.name = "logging-sidecar"
+    sidecar.state.terminated = MagicMock(exit_code=0, reason=None, message=None)
+    sidecar.last_state.terminated = None
+    worker = MagicMock()
+    worker.name = "kinetic-worker"
+    worker.state.terminated = MagicMock(
+      exit_code=137, reason="OOMKilled", message=None
+    )
+    worker.last_state.terminated = None
+    pod.status.container_statuses = [sidecar, worker]
+    pod.status.init_container_statuses = None
+    result = _pod_exit_summary(pod)
+    self.assertIn("137", result)
+    self.assertIn("OOMKilled", result)
+
+  def test_init_container_failure(self):
+    pod = MagicMock()
+    pod.status.container_statuses = []
+    init_cs = MagicMock()
+    init_cs.name = "install-deps"
+    init_cs.state.terminated = MagicMock(
+      exit_code=1, reason="Error", message=None
+    )
+    init_cs.last_state.terminated = None
+    pod.status.init_container_statuses = [init_cs]
+    result = _pod_exit_summary(pod)
+    self.assertIn("exit code 1", result)
+    self.assertIn("Error", result)
+
+
+class TestCollectPodFailureDetails(absltest.TestCase):
+  def test_includes_exit_info_and_logs(self):
+    mock_core = MagicMock()
+    pod = MagicMock()
+    pod.metadata.name = "test-pod-abc"
+
+    terminated = MagicMock()
+    terminated.exit_code = 1
+    terminated.reason = "Error"
+    terminated.message = None
+    cs = MagicMock()
+    cs.name = "kinetic-worker"
+    cs.state.terminated = terminated
+    cs.last_state.terminated = None
+    pod.status.container_statuses = [cs]
+    pod.status.init_container_statuses = None
+
+    mock_core.list_namespaced_pod.return_value.items = [pod]
+    mock_core.read_namespaced_pod_log.return_value = (
+      "Traceback (most recent call last):\n"
+      '  File "run.py", line 1\n'
+      "ImportError: no module named foo\n"
+    )
+
+    result = collect_pod_failure_details(mock_core, "job-1", "default")
+    self.assertIn("exit code 1", result)
+    self.assertIn("Error", result)
+    self.assertIn("ImportError", result)
+
+  def test_empty_when_no_pods(self):
+    mock_core = MagicMock()
+    mock_core.list_namespaced_pod.return_value.items = []
+
+    result = collect_pod_failure_details(mock_core, "job-1", "default")
+    self.assertEqual(result, "")
+
+  def test_logs_only_when_no_terminated_state(self):
+    mock_core = MagicMock()
+    pod = MagicMock()
+    pod.metadata.name = "test-pod"
+    pod.status.phase = "Failed"
+    cs = MagicMock()
+    cs.name = "kinetic-worker"
+    cs.state.terminated = None
+    cs.last_state.terminated = None
+    pod.status.container_statuses = [cs]
+    pod.status.init_container_statuses = None
+    mock_core.list_namespaced_pod.return_value.items = [pod]
+    mock_core.read_namespaced_pod_log.return_value = "some output\n"
+
+    result = collect_pod_failure_details(mock_core, "job-1", "default")
+    self.assertIn("some output", result)
+    self.assertNotIn("exit code", result)
+
+  def test_skips_non_failed_pods(self):
+    mock_core = MagicMock()
+    running_pod = MagicMock()
+    running_pod.metadata.name = "running-pod"
+    running_pod.status.phase = "Running"
+    cs = MagicMock()
+    cs.name = "kinetic-worker"
+    cs.state.terminated = None
+    cs.last_state.terminated = None
+    running_pod.status.container_statuses = [cs]
+    running_pod.status.init_container_statuses = None
+
+    mock_core.list_namespaced_pod.return_value.items = [running_pod]
+
+    result = collect_pod_failure_details(mock_core, "job-1", "default")
+    self.assertEqual(result, "")
+    mock_core.read_namespaced_pod_log.assert_not_called()
+
+  def test_caps_at_five_pods(self):
+    mock_core = MagicMock()
+    pods = []
+    for i in range(7):
+      pod = MagicMock()
+      pod.metadata.name = f"pod-{i}"
+      pod.status.phase = "Failed"
+      cs = MagicMock()
+      cs.name = "kinetic-worker"
+      cs.state.terminated = MagicMock(exit_code=1, reason="Error", message=None)
+      cs.last_state.terminated = None
+      pod.status.container_statuses = [cs]
+      pod.status.init_container_statuses = None
+      pods.append(pod)
+
+    mock_core.list_namespaced_pod.return_value.items = pods
+    mock_core.read_namespaced_pod_log.return_value = "error\n"
+
+    result = collect_pod_failure_details(mock_core, "job-1", "default")
+    self.assertIn("... (additional failed pods omitted)", result)
+    # Only 5 pods should have logs fetched.
+    self.assertEqual(mock_core.read_namespaced_pod_log.call_count, 5)
+
+  def test_api_exception_on_list_pods(self):
+    mock_core = MagicMock()
+    mock_core.list_namespaced_pod.side_effect = ApiException(
+      status=500, reason="Server Error"
+    )
+
+    result = collect_pod_failure_details(mock_core, "job-1", "default")
+    self.assertEqual(result, "")
 
 
 class TestCheckPodScheduling(parameterized.TestCase):

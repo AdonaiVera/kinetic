@@ -237,6 +237,70 @@ def print_pod_logs(core_v1_client, job_name, namespace):
         logging.info("Pod %s logs:\n%s", pod.metadata.name, logs)
 
 
+def _pod_exit_summary(pod):
+  """Extract exit code and termination reason from a pod's container statuses."""
+  all_statuses = list(pod.status.container_statuses or [])
+  all_statuses.extend(pod.status.init_container_statuses or [])
+  for cs in sorted(all_statuses, key=lambda x: x.name != "kinetic-worker"):
+    terminated = getattr(cs.state, "terminated", None)
+    if terminated is None:
+      terminated = getattr(getattr(cs, "last_state", None), "terminated", None)
+    if terminated is None:
+      continue
+    parts = []
+    if terminated.exit_code is not None:
+      parts.append(f"exit code {terminated.exit_code}")
+    if terminated.reason:
+      parts.append(terminated.reason)
+    if terminated.message:
+      parts.append(terminated.message.rstrip())
+    if parts:
+      return ", ".join(parts)
+  return None
+
+
+def collect_pod_failure_details(core_v1_client, job_name, namespace, tail=30):
+  """Build a failure summary from pod status and logs.
+
+  Fetches up to 100 tail lines per pod, logs them for debugging, and
+  returns an error string with exit info and the last ``tail`` lines.
+  Returns empty string if nothing useful could be retrieved.
+  """
+  sections = []
+  try:
+    pods = list_job_pods(core_v1_client, job_name, namespace)
+  except ApiException:
+    return ""
+
+  fetched = 0
+  for pod in pods:
+    summary = _pod_exit_summary(pod)
+    if not summary and pod.status.phase != "Failed":
+      continue
+
+    if fetched >= 5:
+      sections.append("  ... (additional failed pods omitted)")
+      break
+
+    fetched += 1
+    pod_name = pod.metadata.name
+    if summary:
+      sections.append(f"  {pod_name}: {summary}")
+
+    with suppress(ApiException):
+      logs = core_v1_client.read_namespaced_pod_log(
+        pod_name, namespace, tail_lines=100
+      )
+      if logs:
+        logging.info("Pod %s logs:\n%s", pod_name, logs)
+      if logs and logs.strip():
+        tail_lines = logs.rstrip().splitlines()[-tail:]
+        sections.append(f"  --- {pod_name} logs (last {tail} lines) ---")
+        sections.append("\n".join(tail_lines))
+
+  return "\n".join(sections)
+
+
 def _get_cluster_info() -> tuple[str, str, str] | None:
   """Extract project, location, and cluster name from kubeconfig context.
 
