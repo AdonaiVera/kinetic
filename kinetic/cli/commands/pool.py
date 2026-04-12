@@ -39,7 +39,8 @@ def pool():
 @click.option(
   "--reservation",
   default=None,
-  help="GCP capacity reservation name to consume when provisioning nodes",
+  envvar="KINETIC_RESERVATION",
+  help="GCP capacity reservation name to consume when provisioning nodes [env: KINETIC_RESERVATION]",
 )
 def pool_add(
   project, zone, cluster_name, accelerator, min_nodes, yes, spot, reservation
@@ -57,6 +58,12 @@ def pool_add(
     raise click.BadParameter(
       "Cannot add a CPU node pool. Use 'kinetic up' instead.",
       param_hint="--accelerator",
+    )
+
+  if reservation and spot:
+    raise click.BadParameter(
+      "Reservations cannot be used with Spot VMs.",
+      param_hint="--reservation",
     )
 
   new_pool_name = generate_pool_name(accel_config)

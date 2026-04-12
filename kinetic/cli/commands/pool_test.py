@@ -107,6 +107,13 @@ class PoolAddTest(absltest.TestCase):
     config = self.mock_apply.call_args[0][0]
     self.assertEqual(config.node_pools[0].reservation, "my-v6e-reservation")
 
+  def test_add_reservation_with_spot_rejected(self):
+    args = _ADD_ARGS + ["--reservation", "my-reservation", "--spot"]
+    result = self.runner.invoke(pool, args)
+
+    self.assertNotEqual(result.exit_code, 0)
+    self.assertIn("Reservations cannot be used with Spot VMs", result.output)
+
   def test_add_cpu_rejected(self):
     result = self.runner.invoke(
       pool,
