@@ -61,6 +61,11 @@ def _load_sharded_weights(backbone, manifest_path):
   import h5py
   import jax
   import numpy as np
+
+  # TODO: remove these internal imports once Keras exposes a public layer
+  # traversal API. They are needed because load_weights() via the full CausalLM
+  # prepends a backbone/ prefix that mismatches the manifest paths, forcing a
+  # custom h5py-based traversal that replicates Keras's internal saving logic.
   from keras.src.saving import saving_lib
   from keras.src.saving.keras_saveable import KerasSaveable
   from keras.src.utils import naming
