@@ -2,7 +2,7 @@
 
 This guide walks through fine-tuning [Gemma 4 Instruct 26B](https://www.kaggle.com/models/keras/gemma4) on a TPU slice using Kinetic. You will use Low-Rank Adaptation (LoRA) to reduce memory requirements, save the adapted weights to GCS, and run inference with the fine-tuned model, all from your local machine.
 
-The model used here is `gemma4_instruct_26b_a4b`, a Mixture of Experts (MoE) architecture with 26B total parameters and 4B active parameters per forward pass. All 26B weights load into memory (~52 GB in bfloat16), so a v5litepod-8 (8 chips × 16 GB = 128 GB HBM) is the minimum required configuration. A self-contained script combining both steps is available at [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning.py).
+The model used here is `gemma4_instruct_26b_a4b`, a Mixture of Experts (MoE) architecture with 26B total parameters and 4B active parameters per forward pass. All 26B weights load into memory (~52 GB in bfloat16), so a v5litepod-8 (8 chips × 16 GB = 128 GB HBM) is the minimum required configuration. A self-contained script combining both steps is available at [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning/gemma4_finetuning.py).
 
 ## Prerequisites
 
@@ -76,9 +76,9 @@ Four things are worth understanding before reading the code:
 
 **Weight sharding.** The 26B model does not fit on a single 16 GB chip. `ModelParallel` with an explicit `LayoutMap` splits weights across all 8 chips at variable creation time. The `LayoutMap` must be set before calling `from_preset()` so that variables are created with the correct sharding specs from the start.
 
-**Custom weight loading.** The Kaggle preset stores weights across 6 sharded H5 files described by a `model.weights.json` manifest. Keras's built-in `load_weights()` on the full `CausalLM` prepends a `backbone/` prefix that mismatches every path in the manifest. Loading via `model.backbone.load_weights()` avoids that prefix, but Keras ≤ 3.14 has a bug in `ShardedH5IOStore`: after switching to a different shard file, the internal `current_shard_path` pointer is not updated. When a subsequent `keys()` call restores to the stale path, layers whose weights span multiple shards — every MoE expert bank and the token embedding — fail to load, producing a "received 0 variables" error. The solution is to bypass `ShardedH5IOStore` entirely and read the H5 files directly with h5py, pre-sharding each tensor with `jax.device_put` before assigning it to avoid a memory spike on device 0. The complete loader is implemented as `_load_sharded_weights()` in [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning.py).
+**Custom weight loading.** The Kaggle preset stores weights across 6 sharded H5 files described by a `model.weights.json` manifest. Keras's built-in `load_weights()` on the full `CausalLM` prepends a `backbone/` prefix that mismatches every path in the manifest. Loading via `model.backbone.load_weights()` avoids that prefix, but Keras ≤ 3.14 has a bug in `ShardedH5IOStore`: after switching to a different shard file, the internal `current_shard_path` pointer is not updated. When a subsequent `keys()` call restores to the stale path, layers whose weights span multiple shards — every MoE expert bank and the token embedding — fail to load, producing a "received 0 variables" error. The solution is to bypass `ShardedH5IOStore` entirely and read the H5 files directly with h5py, pre-sharding each tensor with `jax.device_put` before assigning it to avoid a memory spike on device 0. The complete loader is implemented as `_load_sharded_weights()` in [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning/gemma4_finetuning.py).
 
-The code below assumes `_load_sharded_weights` and `_make_layout_map` are defined as in [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning.py).
+The code below assumes `_load_sharded_weights` and `_make_layout_map` are defined as in [`examples/gemma4_finetuning.py`](../../examples/gemma4_finetuning/gemma4_finetuning.py).
 
 ```python
 import os

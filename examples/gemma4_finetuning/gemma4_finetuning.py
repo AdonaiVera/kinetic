@@ -8,8 +8,9 @@ is the minimum supported configuration.
 Set the placeholder values in __main__ before running.
 See docs/guides/gemma4_finetuning.md for a full walkthrough.
 
-Dependencies are declared in examples/requirements.txt, which Kinetic
-auto-discovers and installs in the remote container.
+Dependencies are declared in requirements.txt in this directory. Run this
+script from examples/gemma4_finetuning/ so Kinetic picks it up from the
+current working directory.
 """
 
 import os
